@@ -77,7 +77,7 @@ public struct AppDMG {
     
     public var log: Bool = false {
         didSet {
-            hdiutil.log = self.log
+            hdiutil.configure(options: .log(self.log))
         }
     }
     

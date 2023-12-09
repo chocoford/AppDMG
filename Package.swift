@@ -15,7 +15,7 @@ let package = Package(
     dependencies: [
         // Dependencies declare other packages that this package depends on.
         // .package(url: /* package url */, from: "1.0.0"),
-        .package(path: "../hdiutil"),
+        .package(url: "https://github.com/chocoford/hdiutil.git", branch: "main"),
         .package(path: "../DSStoreKit")
     ],
     targets: [
