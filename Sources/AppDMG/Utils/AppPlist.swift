@@ -14,7 +14,7 @@ extension AppPlist {
         let plistURL = appURL
             .appendingPathComponent("Contents", conformingTo: .directory)
             .appendingPathComponent("Info", conformingTo: .propertyList)
-        
+
         let data = try Data(contentsOf: plistURL)
         self = try PropertyListDecoder().decode(AppPlist.self, from: data)
     }

@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import OSLog
 
 extension SecurityHelper {
     struct SecurityError: LocalizedError {
@@ -18,6 +19,8 @@ extension SecurityHelper {
 }
 
 public class SecurityHelper {
+    let logger = Logger(subsystem: "com.chocoford.AppDMG", category: "SecurityHelper")
+    
     static var shared: SecurityHelper = SecurityHelper()
     
     private init() {}
@@ -97,7 +100,7 @@ public class SecurityHelper {
                     let data = pipe.fileHandleForReading.readDataToEndOfFile()
                     outputString = String(data: data, encoding: .utf8)!
                 }
-                print(outputString)
+//                logger.error("outputString: \(outputString, privacy: .public)")
                 
                 var output: [Identity] = []
                 

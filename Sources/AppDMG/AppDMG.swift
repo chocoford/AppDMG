@@ -27,17 +27,20 @@ extension AppDMG {
         }
     }
     
-    public struct Point {
-        public var x: Int
-        public var y: Int
-        
-        public static var zero: Point {
-            Point(x: 0, y: 0)
-        }
+    public enum DMGBackgroundOption {
+        case `default`
+        case manually(_ url: URL)
+        case skip
+    }
+    
+    public enum DMGIconOption {
+        case `default`
+        case manually(_ url: URL)
+        case skip
     }
     
     public struct Appendix {
-        public enum AppendixType {
+        public enum AppendixType: Int {
             case symbolLink
             case file
         }
@@ -47,7 +50,7 @@ extension AppDMG {
         public var type: AppendixType
         public var position: CGPoint
         
-        init(name: String?, destination: URL, type: AppendixType, position: CGPoint) {
+        public init(name: String?, destination: URL, type: AppendixType, position: CGPoint) {
             self.name = name ?? destination.lastPathComponent
             self.destination = destination
             self.type = type
@@ -60,7 +63,6 @@ extension AppDMG {
         public static func quickLook(position: CGPoint = CGPoint(x: 480, y: 170)) -> Appendix {
             Appendix(name: "QuickLook", destination: URL(string: "file:///Library/QuickLook")!, type: .symbolLink, position: position)
         }
-        
     }
     
     public enum CodesignOption {
@@ -68,12 +70,15 @@ extension AppDMG {
         case manually(_ identity: String)
         case skip
     }
+    
 }
 
-public struct AppDMG {
+public class AppDMG {
     public static var `default`: AppDMG = AppDMG()
     
-    let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "", category: "AppDMG")
+    let logger = Logger(subsystem: "com.chocoford.AppDMG", category: "AppDMG")
+    
+    private init() {}
     
     public var log: Bool = false {
         didSet {
@@ -81,8 +86,11 @@ public struct AppDMG {
         }
     }
     
+    private var createDMGProgress: [UUID : CreateDMGStatus] = [:]
+    
     /// Create DMG with specific options.
     /// - Parameters:
+    ///   - id: The ID identify the task for later check progress.
     ///   - url: The file url of the source App.
     ///   - desDirectory: The file url of the output location. Pass nil if you want to place it on the same folder of source App.
     ///   - backgroundImage: The url of the background image of dmg.
@@ -91,22 +99,27 @@ public struct AppDMG {
     ///   - appIconPos: The icon position of the source app in the dmg file.
     ///   - appendixes: Appendixes of dmg file. You can copy anohter file in dmg or make symbol links to dmg. By default there is a symbol link to `/Applications`
     ///   - codesign: The codesign options of dmg file. By default the dmg is codesign automatically.
+    @discardableResult
     public func createDMG(
-        url: URL, 
+        id: UUID = UUID(),
+        url: URL,
         to desDirectory: URL? = nil,
-        backgroundImage: URL? = nil,
-        dmgIcon: URL? = nil,
+        backgroundImage: DMGBackgroundOption = .default,
+        dmgIcon: DMGIconOption = .default,
         windowRect: CGRect = CGRect(x: 200, y: 200, width: 660, height: 400),
         appIconPos: CGPoint = CGPoint(x: 180, y: 170),
         appendixes: [Appendix] = [.application()],
-        codesign: CodesignOption = .auto
-    ) async throws {
+        codesign: CodesignOption = .auto,
+        onProgress: (CreateDMGStatus) -> Void = { _ in }
+    ) async throws -> URL {
+        self.createDMGProgress.updateValue(.waiting, forKey: id)
+        defer { self.createDMGProgress.removeValue(forKey: id) }
         let fileManager = FileManager.default
-        
+        if log { logger.info("Start read app info: \(url, privacy: .public)") }
         let appPlist = try AppPlist(appURL: url)
         let appFileName = url.lastPathComponent
         
-        let dmgName = "\(appPlist.appName) \(appPlist.version)"
+        let dmgName = appPlist.appName
         
         let desPath: String
         if let desURL = desDirectory {
@@ -115,11 +128,12 @@ public struct AppDMG {
             desPath = url.deletingLastPathComponent()
                 .filePath
         }
-        
-        logger.info("Start create dmg")
+        if log { logger.info("Start create dmg") }
+        onProgress(.create)
+        self.createDMGProgress.updateValue(.create, forKey: id)
         // Create DMGs
         let createOutput = try await hdiutil.create(
-            image: "\(dmgName).dmg",
+            image: "\(dmgName) \(appPlist.shortVersionString ?? "").dmg",
             to: desPath,
             options: [
                 .srcFolder(url.filePath),
@@ -130,10 +144,13 @@ public struct AppDMG {
                 .overwrite
             ]
         )
-        
+
         let dmgURL = createOutput.dmgURL
         
-        logger.info("Start attach dmg")
+        // Attach
+        if log { logger.info("Start attach dmg") }
+        onProgress(.attach)
+        self.createDMGProgress.updateValue(.attach, forKey: id)
         // Attach image to modify its contents
         let attachOutput = try await hdiutil.attach(image: dmgURL.filePath, options: [
             .mountRandom("/tmp"),
@@ -145,26 +162,39 @@ public struct AppDMG {
         let deviceName = attachOutput.deviceNode
         let mountURL = attachOutput.mountPoint
         
-        
+        // Background image
+        onProgress(.makeBackground)
+        self.createDMGProgress.updateValue(.makeBackground, forKey: id)
         let backgroundDir = mountURL.appendingPathComponent(".background", conformingTo: .directory)
-        
-        if fileManager.fileExists(at:  backgroundDir) {
+        if fileManager.fileExists(at: backgroundDir) {
             try fileManager.removeItem(at: backgroundDir)
         }
         try fileManager.createDirectory(
             at: mountURL.appendingPathComponent(".background", conformingTo: .directory),
             withIntermediateDirectories: true
         )
-        
-        if let backgroundURL = backgroundImage {
-            try fileManager.copyItem(
-                at: backgroundURL,
-                to: mountURL
+        let backgroundURL: URL?
+        switch backgroundImage {
+            case .default:
+//                let bgFileURL = Bundle.module.url(forResource: "default-bg@2x", withExtension: "png")!
+                let bgFileURL = Bundle.module.url(forResource: "dmg-background", withExtension: "tiff")!
+                backgroundURL = mountURL
                     .appendingPathComponent(".background", conformingTo: .directory)
-                    .appendingPathComponent(backgroundURL.lastPathComponent, conformingTo: .image)
-            )
+                    .appendingPathComponent(bgFileURL.lastPathComponent, conformingTo: .image)
+                try fileManager.copyItem(at: bgFileURL, to: backgroundURL!)
+                print("backgroundURL: \(backgroundURL!)")
+            case .manually(let url):
+                backgroundURL = mountURL
+                    .appendingPathComponent(".background", conformingTo: .directory)
+                    .appendingPathComponent(url.lastPathComponent, conformingTo: .image)
+                try fileManager.copyItem(at: url, to: backgroundURL!)
+            case .skip:
+                backgroundURL = nil
         }
-        
+
+        // Appendix
+        onProgress(.addAppendix)
+        self.createDMGProgress.updateValue(.addAppendix, forKey: id)
         for appendix in appendixes {
             switch appendix.type {
                 case .symbolLink:
@@ -176,44 +206,54 @@ public struct AppDMG {
                     try fileManager.copyItem(atPath: appendix.destination.filePath, toPath: "\(mountURL.filePath)/\(appendix.name)")
             }
         }
+
         
         // copy icon
+        onProgress(.setIcon)
+        self.createDMGProgress.updateValue(.setIcon, forKey: id)
         var volIcon: NSImage? = nil
-        if let dmgIcon = dmgIcon {
-//            try fileManager.copyItem(atPath: dmgIcon.filePath, toPath: "\(mountURL.filePath)/.VolumeIcon.icns")
-            volIcon = NSImage(contentsOf: dmgIcon)
-        } else {
-            if let appIconFileName = appPlist.iconFileName {
-                let resourcesDir = url.appendingPathComponent("Contents", conformingTo: .directory)
-                 .appendingPathComponent("Resources", conformingTo: .directory)
-                var extensionType: UTType? = nil
-                if let pathExtension = appIconFileName.components(separatedBy: ".").last,
-                   pathExtension != appIconFileName {
-                    extensionType = UTType(filenameExtension: pathExtension)
+        switch dmgIcon {
+            case .default:
+                if let appIconFileName = appPlist.iconFileName {
+                    let resourcesDir = url.appendingPathComponent("Contents", conformingTo: .directory)
+                        .appendingPathComponent("Resources", conformingTo: .directory)
+                    var extensionType: UTType? = nil
+                    if let pathExtension = appIconFileName.components(separatedBy: ".").last,
+                       pathExtension != appIconFileName {
+                        extensionType = UTType(filenameExtension: pathExtension)
+                    }
+                    let appIcon = resourcesDir
+                        .appendingPathComponent(appIconFileName, conformingTo: extensionType ?? .icns)
+                    
+                    volIcon = try makeIcon(appIcon: appIcon)
                 }
-                let appIcon = resourcesDir
-                    .appendingPathComponent(appIconFileName, conformingTo: extensionType ?? .icns)
                 
-                volIcon = try makeIcon(appIcon: appIcon)
-
-//                guard let volIconURL = URL(string: "file://\(mountURL.filePath)/.VolumeIcon.icns") else {
-//                    throw AppDMGError.dmgIconError("volumn icon path located failed")
-//                }
-//                try volIcon.saveIcns(to: volIconURL)
-            }
+            case .manually(let url):
+                volIcon = NSImage(contentsOf: url)
+                
+            default:
+                break
         }
+
         if let volIcon = volIcon {
             NSWorkspace.shared.setIcon(volIcon, forFile: mountURL.filePath)
         }
-        
-        
-        
+
         // prettyDMG
-        try await self.prettyDMG(mountURL: mountURL, windowRect: windowRect, appName: appFileName, appPos: appIconPos, appendixes: appendixes)
+        onProgress(.decorateContent)
+        self.createDMGProgress.updateValue(.decorateContent, forKey: id)
+        try await self.prettyDMG(
+            mountURL: mountURL,
+            backgroundURL: backgroundURL,
+            windowRect: windowRect,
+            appName: appFileName, 
+            appPos: appIconPos,
+            appendixes: appendixes
+        )
         
         // make readonly
-        
-        
+        onProgress(.modifyPermission)
+        self.createDMGProgress.updateValue(.modifyPermission, forKey: id)
         // # Tell the volume that it has a special file attribute
         // SetFile -a C "$MOUNT_DIR"
         try fileManager.setAttributes([.posixPermissions : 0777], of: dmgURL)
@@ -226,9 +266,13 @@ public struct AppDMG {
         
         
         // detach
+        onProgress(.detach)
+        self.createDMGProgress.updateValue(.detach, forKey: id)
         try await hdiutil.detach(deviceName: deviceName)
         
         // Compress image and optionally encrypt
+        onProgress(.compress)
+        self.createDMGProgress.updateValue(.compress, forKey: id)
         try await hdiutil.convert(
             image: dmgURL.filePath,
             format: .udzo,
@@ -240,9 +284,13 @@ public struct AppDMG {
         )
         
         // codesign
+        onProgress(.codesign)
+        self.createDMGProgress.updateValue(.codesign, forKey: id)
+        if log { logger.info("begin codesign") }
         switch codesign {
             case .auto:
                 let identities = try await SecurityHelper.shared.listIdentities(policy: .codesigning)
+                if log { logger.info("identities: \(identities, privacy: .public)") }
                 let identity = identities.first(where: {$0.type == .developerID}) ?? identities.first(where: {$0.type == .macDeveloper}) ?? identities.first(where: {$0.type == .appleDevelopment})
                 guard let identity = identity else { throw AppDMGError.codesignFailed }
                 try await CodesignHelper.shared.codesign(identity: identity.id, target: dmgURL)
@@ -254,19 +302,32 @@ public struct AppDMG {
                 break
         }
         
-
         // notarize
-        
+        onProgress(.setIcon)
+        self.createDMGProgress.updateValue(.setIcon, forKey: id)
         if let volIcon = volIcon {
             NSWorkspace.shared.setIcon(volIcon, forFile: dmgURL.filePath)
         }
+        
+        return dmgURL
+    }
+    
+    public func getCreateDMGStatus(id: UUID) -> CreateDMGStatus? {
+        createDMGProgress[id]
     }
     
     public func help() async throws -> String {
         return try await hdiutil.help()
     }
     
-    public func prettyDMG(mountURL: URL, windowRect: CGRect, appName: String, appPos: CGPoint, appendixes: [Appendix]) async throws {
+    public func prettyDMG(
+        mountURL: URL, 
+        backgroundURL: URL?,
+        windowRect: CGRect,
+        appName: String,
+        appPos: CGPoint,
+        appendixes: [Appendix]
+    ) async throws {
         struct PrettyDMGError: LocalizedError {
             var errorDescription: String?
         }
@@ -274,12 +335,22 @@ public struct AppDMG {
         var dsStore = DSStore.create()
         try dsStore.insertRecord(.bwsp(.createNew(
             value: .init(
-                containerShowSidebar: false, showPathbar: false, 
+                containerShowSidebar: false, 
+                showPathbar: false,
                 showSidebar: false, showStatusBar: false,
                 showTabView: false, showToolbar: false,
                 windowBounds: windowRect
             ))))
-        try dsStore.insertRecord(.icvp(.createNew(value: .init())))
+        try dsStore.insertRecord(
+            .icvp(
+                .createNew(
+                    value: .init(
+                        backgroundImageAlias: Record.icvpRecord.createBackgroundAlias(backgroundURL: backgroundURL),
+                        backgroundType: 2
+                    )
+                )
+            )
+        )
         
         dsStore.insertRecord(.vSrn(.general()))
 
@@ -308,7 +379,7 @@ public struct AppDMG {
             throw AppDMGError.dmgIconError("load app icon failed")
         }
         
-        logger.debug("Begin to make icon. Disk icon size: \(diskIcon.size.debugDescription)")
+        if log { logger.debug("Begin to make icon. Disk icon size: \(diskIcon.size.debugDescription)") }
         
         
         var newRepresentations = [NSImageRep]()
@@ -377,5 +448,52 @@ public struct AppDMG {
         image.draw(in: NSMakeRect(0, 0, newSize.width, newSize.height), from: NSZeroRect, operation: .copy, fraction: 1.0)
         resizedImage.unlockFocus()
         return resizedImage
+    }
+}
+
+
+extension AppDMG {
+    public enum CreateDMGStatus: Int, Codable, CustomStringConvertible {
+        case waiting
+        case create
+        case attach
+        case makeBackground
+        case addAppendix
+        case setIcon
+        case decorateContent
+        case modifyPermission
+        case clean
+        case detach
+        case compress
+        case codesign
+        
+        public var description: String {
+            switch self {
+                case .waiting:
+                    "Waiting..."
+                case .create:
+                    "Creating DMG..."
+                case .attach:
+                    "Attaching DMG..."
+                case .makeBackground:
+                    "Making background of DMG..."
+                case .addAppendix:
+                    "Linking symbols..."
+                case .setIcon:
+                    "Setting icon..."
+                case .decorateContent:
+                    "Decorating DMG's content..."
+                case .modifyPermission:
+                    "Modifying permission..."
+                case .clean:
+                    "Clean redundant files..."
+                case .detach:
+                    "Detaching DMG..."
+                case .compress:
+                    "Compressing DMG..."
+                case .codesign:
+                    "Codesigning DMG..."
+            }
+        }
     }
 }
