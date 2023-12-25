@@ -182,7 +182,6 @@ public class AppDMG {
                     .appendingPathComponent(".background", conformingTo: .directory)
                     .appendingPathComponent(bgFileURL.lastPathComponent, conformingTo: .image)
                 try fileManager.copyItem(at: bgFileURL, to: backgroundURL!)
-                print("backgroundURL: \(backgroundURL!)")
             case .manually(let url):
                 backgroundURL = mountURL
                     .appendingPathComponent(".background", conformingTo: .directory)
