@@ -92,7 +92,7 @@ public class AppDMG {
     /// - Parameters:
     ///   - id: The ID identify the task for later check progress.
     ///   - url: The file url of the source App.
-    ///   - desDirectory: The file url of the output location. Pass nil if you want to place it on the same folder of source App.
+    ///   - to: The file url of the output location. Pass nil if you want to place it on the same folder of source App.
     ///   - backgroundImage: The url of the background image of dmg.
     ///   - dmgIcon: The icon url of dmg.
     ///   - windowRect: The rect of the dmg window. (Displayed when user open it)
@@ -119,25 +119,30 @@ public class AppDMG {
         let appPlist = try AppPlist(appURL: url)
         let appFileName = url.lastPathComponent
         
-        let dmgName = appPlist.appName
-        
-        let desPath: String
-        if let desURL = desDirectory {
-            desPath = desURL.filePath
+        var desURL = desDirectory ?? url.deletingLastPathComponent()
+        var desPath: String { desURL.filePath }
+        var isDesURLADir = false
+        let imageName: String
+        _ = fileManager.fileExists(at: desURL, isDirectory: &isDesURLADir)
+        if isDesURLADir {
+            imageName = "\(appPlist.appName) \(appPlist.shortVersionString ?? "").dmg"
         } else {
-            desPath = url.deletingLastPathComponent()
-                .filePath
+            imageName = desURL.lastPathComponent
+            desURL = desURL.deletingLastPathComponent()
         }
+        
+        
+        
         if log { logger.info("Start create dmg") }
         onProgress(.create)
         self.createDMGProgress.updateValue(.create, forKey: id)
         // Create DMGs
         let createOutput = try await hdiutil.create(
-            image: "\(dmgName) \(appPlist.shortVersionString ?? "").dmg",
+            image: imageName,
             to: desPath,
             options: [
                 .srcFolder(url.filePath),
-                .volname(dmgName),
+                .volname(appPlist.appName),
                 .fs(.hfs),
                 .fsargs("-c c=64,a=16,e=16"),
                 .format(.udrw),
